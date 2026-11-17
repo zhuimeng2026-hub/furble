@@ -341,7 +341,14 @@ if (used < sizeof(line) - 1) {
 - **非 S3 条件编译（F-3）**：`FurbleRemote.cpp` 在 `CONFIG_ESP_CONSOLE_SECONDARY_USB_SERIAL_JTAG=0` 下用 ESP-IDF 的 xtensa g++ 做 `-fsyntax-only` 检查通过，确认 `#else` 空实现分支可编译、链接符号齐全。未对 m5stick-c 做全量链接（PIO 增量清理触发本机安全 hook 的批量删除拦截，与代码无关；改用单文件编译检查等价验证条件编译正确性）。
 - **仍未做**：烧录与真机运行时验证（PING/SHUTTER/FOCUS 对 X100VI 的实际响应）——设备未连接，属第 4 节固有缺口，不受本次修复影响。
 
-### 7.2 待复核人确认
+### 7.2 一键烧录脚本
+
+为把"烧录实测"固化为无需 AI 介入的流程，新增 `FLASH_M5S3.bat`（双击入口，纯 ASCII/CRLF）+ `FLASH_M5S3.ps1`（主体）：
+- 用项目 `.venv` 的 pyserial 枚举 COM 口，按 ESP32-S3 USB-JTAG / 常见桥芯片 VID:PID 排序；唯一设备直接烧、多个列出让人选、0 个明确提示插设备退出。
+- 烧录命令 `pio run -e m5stick-s3 -t upload --upload-port <COM>`（编译+烧录一步）；成功后打印端口与串口监视器命令供手动验证。
+- 本机实测：无设备时干净退出；PowerShell 语法解析通过；上传/monitor 参数已核对。真机烧录待设备接入后执行。
+
+### 7.3 待复核人确认
 
 - F-1 用持锁的 `submitIfActive()` 检查状态+入队，是否认可（非 ACTIVE 走无锁快速路径立即返回，避免连接阶段被 `connectAll()` 的长持锁阻塞；ACTIVE 才取锁，与 `Control::task()` 消费队列不冲突，无死锁风险）。
 - F-3 采用文件内 `#if` + 空实现而非改 CMakeLists，是否认可（好处是不破坏其他板型的符号链接）。

@@ -123,6 +123,15 @@ In most cases it should be:
 
 More details are on the wiki: [PlatformIO](https://github.com/gkoh/furble/wiki/Linux-Command-Line-(For-Developers))
 
+### One-click flash (M5StickS3, Windows)
+
+Double-click `FLASH_M5S3.bat` in the repo root. It automatically detects the
+serial port (handles COM-port drift), asks you to confirm when more than one
+device is present, builds, and flashes the `m5stick-s3` environment. On
+success it prints the port and the command to open a serial console for
+verification. `FLASH_M5S3.ps1` is the underlying script if you prefer to run
+it directly from PowerShell.
+
 ## Usage
 
 The top level menu has the following entries:
