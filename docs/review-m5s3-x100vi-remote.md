@@ -346,3 +346,145 @@ if (used < sizeof(line) - 1) {
 - F-1 用持锁的 `submitIfActive()` 检查状态+入队，是否认可（非 ACTIVE 走无锁快速路径立即返回，避免连接阶段被 `connectAll()` 的长持锁阻塞；ACTIVE 才取锁，与 `Control::task()` 消费队列不冲突，无死锁风险）。
 - F-3 采用文件内 `#if` + 空实现而非改 CMakeLists，是否认可（好处是不破坏其他板型的符号链接）。
 - 是否接受对 F-5 的判定修正。
+
+---
+
+## 8. 独立复核结论（2026-11-17，复核人未参与 `ff9170a` 的实现）
+
+### 8.1 复核方式
+
+不采信第 7 节的自述，独立验证：
+
+- **代码走读**：`ff9170a` 的完整 diff + 相关上下游代码（`Control::task()` 状态机、`Camera::isConnected()`、UI 侧的快门/对焦处理）
+- **产物二进制扫描**：对 `firmware.bin` 逐字节匹配协议字符串
+- **补做链接级验证**：第 7.1 节记录 m5stick-c 全量构建被本机 hook 拦截，本次已绕过并**完整跑通**（SUCCESS，exit 0，11 分 40 秒，产出 `firmware.bin` 996816 字节）
+
+### 8.2 判定
+
+| 项 | 判定 | 一句话理由 |
+| :--- | :--- | :--- |
+| F-1 | ✅ 已修，**残留 R-1** | 假成功的两条路径均已封堵；但释放半段可能丢失（新增发现） |
+| F-3 | ✅ 已修，验证比原记录更充分 | 链接级验证已补齐，跨板型二进制交叉比对确认 |
+| F-2 | ✅ 已修，**残留 R-2** | 快照拷贝正确；但 `snapshot()` 持锁引入新的阻塞窗口（新增发现） |
+| F-4 | ✅ 已修 | 逐行核对无误 |
+| F-5 | ✅ 判定修正正确 | 原结论确有误，修正成立 |
+
+### 8.3 F-1 复核
+
+**修复成立。** `Control::submitIfActive()`（`src/FurbleControl.cpp:193-209`）结构正确：
+
+```
+快速路径（不取锁）：m_State != STATE_ACTIVE          → SUBMIT_NOT_CONNECTED
+持锁路径：重查 m_State + m_Targets 非空 + allConnected() → SUBMIT_NOT_CONNECTED
+        xQueueSend(...) == pdTRUE                     → SUBMIT_OK / SUBMIT_BUSY
+```
+
+原 F-1 描述的两条丢弃路径均已封堵：
+
+| 原丢失去向 | 原行为 | 现行为 |
+| :--- | :--- | :--- |
+| 控制队列满（32 格） | `xQueueSend` 静默失败，仍回 `OK` | `SUBMIT_BUSY` → `ERR busy` ✅ |
+| 非 `STATE_ACTIVE`，命令被 `Control::task()` 消费后丢弃 | 仍回 `OK` | 入队前即拒绝 → `ERR not-connected` ✅ |
+
+`FurbleRemote.cpp` 中 6 处相机命令已全部改走 `submitIfActive`，无 `sendCommand` 残留（grep 确认）。
+
+**快速路径的设计判断正确**：`connectAll()`（`src/FurbleControl.cpp:98`）持锁跨越 `camera->connect()`（超时最长 30 秒），但期间 `m_State` 已被置为 `STATE_CONNECTING`（`:151`），快速路径据此不取锁直接返回，不会被连接过程阻塞。
+
+**无死锁**：锁序恒为 `Control::m_Mutex` → `Camera::m_Mutex`（`Camera::isConnected()` 内部取 `Camera::m_Mutex`），已确认 `lib/furble/Camera.cpp` 不反向引用 `Control`，不存在反向锁序。第 7.2 节"无死锁风险"的结论成立。
+
+### 8.4 R-1【新增·中】`tap` 的释放半段可能丢失，富士快门/对焦停在按下状态
+
+**位置**：`src/FurbleRemote.cpp:72-81`
+
+```cpp
+Control::submit_result_t result = control.submitIfActive(press);
+if (result != Control::SUBMIT_OK) { replySubmit(result); return; }
+vTaskDelay(hold);
+replySubmit(control.submitIfActive(release));   // ← 与按下走同一道闸门
+```
+
+按下已投递后，**释放同样要过 `submitIfActive()` 的状态检查**。若释放被拒（队列满，或 100ms/400ms 保持窗口内 `allConnected()` 瞬时为假），则按下已送达而释放永远没送出。
+
+**在 X100VI 上的具体后果**（`lib/furble/Fujifilm.cpp`）：
+
+- `shutterPress()` → `SHUTTER_CMD` + `SHUTTER_PRESS`
+- `shutterRelease()` → `SHUTTER_CMD` + `SHUTTER_RELEASE`
+- **`focusRelease()` 直接调用 `shutterRelease()`**（`:89-91`）——对焦释放与快门释放是同一条 GATT 写
+
+因此释放丢失意味着：快门停在半按下（不曝光、不出片），或 AF-ON 持续保持（对焦不停）。而脚本此时收到的是 `ERR busy` / `ERR not-connected`，通常会重试 `SHUTTER`，在相机已处于按下态的基础上再次按下，状态更乱。
+
+**建议**：释放是**清理动作**，只要按下已被接受就必须送达，不应再受连接状态闸门约束。建议增加一条不受状态检查的强制入队路径（阻塞式 `xQueueSend`，如 100ms 超时），并以按下阶段的返回值为准回复。
+
+**触发概率**：低（需要 BLE 瞬断落在保持窗口内，或队列积压 32 条）。**后果可恢复**（补发 `SHUTTER_RELEASE` / `FOCUS_RELEASE` 即可），但对无人值守的遥控脚本是真实故障模式。
+
+### 8.5 R-2【新增·中】`STATUS` 持锁可能在连接期间阻塞整个遥控通道长达 30 秒
+
+**位置**：`src/FurbleControl.cpp:211-224`
+
+```cpp
+Control::Snapshot Control::snapshot(void) {
+  const std::lock_guard<std::mutex> lock(m_Mutex);   // ← 无条件取锁
+```
+
+`connectAll()` 持锁跨越 `camera->connect(m_Power, timeout)`，`timeout` 最长 30 秒（`TIMEOUT_DEFAULT_MS`）。`Remote` 是**单任务串行**处理协议的，`snapshot()` 阻塞期间，`PING` 与其它命令一律无响应。
+
+这相对修复前是**行为倒退**：修复前 `STATUS` 不取锁、立即返回（虽然有竞态）。
+
+值得注意的是，**F-1 的修复恰好明确规避了这类阻塞**（`src/FurbleControl.cpp:194-196` 的注释专门解释了这一点），但 F-2 的修复在姊妹函数 `snapshot()` 上把同类问题引了回来。
+
+**对本项目的实际影响**：设备上电会自动连接相机，脚本若以轮询 `STATUS` 等待相机就绪，会在整个连接期间被挂起（最坏 30 秒），容易触发脚本侧超时。
+
+**建议**：(a) 在 `snapshot()` 里对连接中状态走无锁快速路径——`connectAll()` 只读 `m_Targets`，真正修改它的只有 `addActive()`（UI 触发）和 `disconnect()`；(b) 或改用 `std::timed_mutex` 配短超时，拿不到锁就返回上次已知状态。
+
+### 8.6 R-3【低】`m_State` 的无锁读取是形式上的数据竞争
+
+`m_State` 由 Control 任务写（`src/FurbleControl.cpp:144,151,152,161`）、由 UI 任务经 `disconnect()` 写（`:256,276`），现由 Remote 任务无锁读（快速路径 `:198`）。
+
+形式上违反 C++ 内存模型；Xtensa 上对齐 4 字节枚举读写实际原子，且**失效方向是安全的**——陈旧读只可能导致误拒（保守），ACTIVE 路径取锁后会复查。既有问题（`getState()` 在 UI 侧同样无锁），非本次引入，但修复新增了第三个读者。
+
+### 8.7 R-4【低】残余的"已应答但未分发"窗口
+
+`Control::task()` 的 `STATE_ACTIVE` 分支：
+
+```cpp
+if (!allConnected()) { m_State = STATE_CONNECT; continue; }   // ← 已取出的命令被丢弃
+```
+
+若相机恰在此迭代间断开，命令被消费但未分发，而 Remote 已回 `OK`。窗口为一次队列接收迭代。队列无逐条 ack，属设计固有限制；README"actually queued for dispatch"的措辞准确。
+
+### 8.8 F-3 复核
+
+**修复成立，且本次验证比第 7.1 节记录的更充分。**
+
+- `#include "sdkconfig.h"` 路径正确：生成头文件在 `.pio/build/<env>/config/sdkconfig.h`，已确认两个 env 均存在
+- 宏取值：`m5stick-s3` → `#define CONFIG_ESP_CONSOLE_SECONDARY_USB_SERIAL_JTAG 1`；`m5stick-c` → 该宏**完全未出现** → `#if` 求值为 0 → 走 `#else` ✅
+- **链接级验证已补齐**：m5stick-c 全量构建 SUCCESS（exit 0，11:40），产出 `firmware.bin` 996816 字节 → 空实现分支符号齐全，无未定义符号（`handleLine` / `task` 为 private 且无外部引用，不产生链接错误）
+- **跨板型二进制交叉比对**：
+
+| 字符串 | m5stick-s3 | m5stick-c |
+| :--- | :--- | :--- |
+| `/dev/secondary` | FOUND | MISSING |
+| `remote control ready` | FOUND | MISSING |
+| `SHUTTER_RELEASE` | FOUND | MISSING |
+| `ERR not-connected` / `ERR busy` | FOUND | MISSING |
+| `CMDS PING` | FOUND | MISSING |
+| `AF-ON (hold)`（UI 提示，与板型无关） | FOUND | FOUND |
+
+非 S3 板型固件中**不含任何遥控协议实现**，且 UI 提示保留 —— 正是期望结果。开机不再打印 ERROR：`ESP_LOGE` 位于 `#if` 分支内（`src/FurbleRemote.cpp:113`），空实现的 `start()` 返回 false 且不记日志，`main.cpp` 忽略返回值 → 该路径可证明是静默的。
+
+**"文件内 `#if` 而非改 CMakeLists"这个选择我认可**：不依赖各板型的 CMake 配置差异，不存在某个板型漏配导致符号缺失的风险；代价只是非 S3 板型多编译一个空文件，可忽略。
+
+### 8.9 F-5 判定修正复核
+
+**修正成立，我原来的结论有误。**
+
+`UI::shutterLock()`（`src/FurbleUI.cpp:506-509`）就是 `sendCommand(CMD_SHUTTER_PRESS)`，`UI::shutterUnlock()`（`:523-526`）就是 `sendCommand(CMD_SHUTTER_RELEASE)`。原协议用 `SHUTTER_PRESS` + `SHUTTER_RELEASE` 已能复现"快门保持按下"，原"遥控脚本无法复现"的说法不准确。
+
+补充一点文档未言明的细节：UI 的锁定**手势**带有焦点耦合——按住焦点键(B)时按下快门键(A)才进入锁定（`:545-550`），且要松开焦点键才解除（`:579-584`、`:552-556`）。`SHUTTER_LOCK` / `SHUTTER_UNLOCK` 复现的是**效果**（快门保持按下），不包含手势耦合。协议层面合理，但文档宜注明这一边界。
+
+### 8.10 建议处置
+
+1. **R-1**（释放半段强制送达）——影响无人值守遥控的可靠性，几行改动
+2. **R-2**（`snapshot()` 避免长持锁）——影响脚本可用性，几行改动
+3. R-3 / R-4 —— 记录为已知限制即可，不建议为此改动上游共享代码
+4. 仍未做：**烧录与真机运行时验证**（见第 4 节），R-1 / R-2 的实际影响也只有真机能确认
