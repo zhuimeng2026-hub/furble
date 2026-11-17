@@ -1296,7 +1296,7 @@ UI::menu_t &UI::addConnectedMenu(void) {
         buttons = {
             {
              {nullptr, nullptr, "Shutter\n", &icon_camera, 0, 0},
-             {nullptr, nullptr, "Focus\n", &icon_center_focus_strong, 1, 0},
+             {nullptr, nullptr, "AF-ON\n", &icon_center_focus_strong, 1, 0},
              {nullptr, nullptr, "Shutter\nLock", &icon_lock_open_right, 2, 0},
              }
     };
@@ -1387,6 +1387,14 @@ UI::menu_t &UI::addConnectedMenu(void) {
     lv_obj_t *line = lv_line_create(menuShutter.page);
     lv_line_set_points(line, points, n);
     lv_obj_add_style(line, &style, 0);
+
+    // explain what the focus button does
+    lv_obj_t *hint = lv_label_create(menuShutter.page);
+    lv_label_set_text(hint, "B: AF-ON (hold)\nAF-S locks focus");
+    lv_obj_set_style_text_font(hint, &lv_font_montserrat_12, 0);
+    lv_obj_set_style_text_align(hint, LV_TEXT_ALIGN_LEFT, 0);
+    lv_obj_add_flag(hint, LV_OBJ_FLAG_FLOATING);
+    lv_obj_align(hint, LV_ALIGN_TOP_LEFT, 4, 4);
 
     lv_obj_move_foreground(m_ShutterLockIcon);
   }

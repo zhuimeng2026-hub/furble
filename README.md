@@ -44,6 +44,7 @@ The following devices have been tested and confirmed to work:
    - Fujifilm X-T4 ([@TomaszLojewski](https://github.com/TomaszLojewski))
    - Fujifilm X-T5 ([@stulevine](https://github.com/stulevine))
    - Fujifilm X100V
+   - Fujifilm X100VI[^4]
 - Canon
    - Canon EOS M6 ([@tardisx](https://github.com/tardisx))
    - Canon EOS R6 Mark II ([@hijae](https://github.com/hijae))
@@ -72,6 +73,23 @@ The following devices have been tested and confirmed to work:
 [^1]: see [#99](https://github.com/gkoh/furble/discussions/99)
 [^2]: Non-existent
 [^3]: Auto-shutter release only, no manual exposure control
+[^4]: Requires `furble` v3.5.0 or later, see [#208](https://github.com/gkoh/furble/issues/208)
+
+### Fujifilm July 2025 Firmware
+
+The Fujifilm firmware update of July 2025 changed the Bluetooth behaviour of a
+number of cameras (X-T5, X100VI, X-T50, X-S20, X-M5, GFX100RF, X Half, X-E5 and
+GFX100S II) to comply with EU cybersecurity regulations. The camera now
+requires the remote to be paired and bonded, and the Bluetooth address is
+rotated periodically for privacy.
+
+Support for the new behaviour was added in `furble` v3.5.0, see
+[#208](https://github.com/gkoh/furble/issues/208). Known issues on the updated
+cameras:
+- Infinite auto-reconnect does not work, disconnect and reconnect manually
+- The camera is shown as connected after it has been switched off
+- The scan list shows duplicate entries for the same camera
+- GPS is not implemented
 
 ## Supported Controllers
 
@@ -152,7 +170,38 @@ The intervalometer can be configured via three settings in `Settings->Timer`:
 Count can be configured up to 999 or infinite.
 Delay and shutter time can be figured with custom or preset values from 0 to 999 in milliseconds, seconds or minutes.
 
+The shutter time defaults to 400 milliseconds. The original 30 millisecond
+default was too short for the camera to acquire focus and start the shutter,
+existing settings using it are migrated automatically.
+
 Some camera protocols such as Ricoh GR trigger capture with a single operation request and do not expose separate exposure start/stop control. For those cameras the intervalometer still controls the wait, count, and delay between captures, but the camera ignores the configured shutter-open duration.
+
+### Focus (AF-ON)
+
+The focus button (button B) is the remote's AF-ON button. Holding it down
+commands the camera to focus, releasing it stops focusing. On Fujifilm this is
+the camera's half-press state.
+
+What the button does depends on the focus mode selected on the camera:
+
+| Camera mode | Holding button B                                     |
+| :---:       | :---                                                 |
+| AF-S        | Focuses once and **locks the focus point**            |
+| AF-C        | Focuses continuously while held                       |
+| MF          | Nothing, the focus ring is manual                     |
+
+AF-S is the interesting one. Focus, release the button, recompose the shot and
+then press the shutter (button A): the photo is taken at the point you focused,
+not at whatever the camera is pointing at when the shutter is pressed. This is
+the usual way to focus a subject that is off-centre.
+
+Note that the shutter button is a full press, so in AF-C mode the camera
+refocuses when the shutter is pressed and the focus lock is lost.
+
+The focus ring of a fixed lens camera (eg. the Fujifilm X100 series) is
+mechanical, so a manual focus distance cannot be set remotely. In MF mode the
+focus can be set by hand and then left alone: the intervalometer will not
+refocus between shots.
 
 ### Shutter Lock
 

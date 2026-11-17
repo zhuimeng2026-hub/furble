@@ -82,6 +82,12 @@ interval_t Settings::load<interval_t>(type_t type) {
     interval.wait = INTERVAL_DEFAULT_WAIT;
   }
 
+  if (interval.shutter.value == INTERVAL_LEGACY_SHUTTER.value &&
+      interval.shutter.unit == INTERVAL_LEGACY_SHUTTER.unit) {
+    // the legacy default is too short for the camera to focus and fire
+    interval.shutter = INTERVAL_DEFAULT_SHUTTER;
+  }
+
   m_Prefs.end();
 
   return interval;
