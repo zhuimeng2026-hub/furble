@@ -317,3 +317,32 @@ if (used < sizeof(line) - 1) {
 - [ ] F-5：Shutter Lock 是否确有必要纳入遥控协议
 - [ ] 第 4 节：待验证清单是否完整，是否还有遗漏的运行时验证项
 - [ ] 第 5 节：处置顺序是否合理
+
+---
+
+## 7. 修复实施记录（2026-11-17）
+
+复核结论已被确认为真，5 项全部实施。工作分支 `feat/m5s3-x100vi-remote`，改动 5 个文件（相对 `78a9a7b`）：
+
+| 项 | 处置 | 实现 |
+| :--- | :--- | :--- |
+| F-1 | ✅ 已修 | `Control::submitIfActive()` 在 `m_Mutex` 内检查 `STATE_ACTIVE`+非空+`allConnected()` 后再入队，返回 `SUBMIT_OK / SUBMIT_NOT_CONNECTED / SUBMIT_BUSY`；`Remote` 据此回 `OK / ERR not-connected / ERR busy`，连招（SHUTTER/FOCUS）两段都成功才回 OK |
+| F-2 | ✅ 已修 | `Control::snapshot()` 持锁返回 `Snapshot{state, vector<TargetInfo>}` 拷贝；`STATUS` 遍历拷贝而非实时 `m_Targets`，消除与 `disconnect()` 的竞态 |
+| F-3 | ✅ 已修 | `FurbleRemote.cpp` 全文以 `#if CONFIG_ESP_CONSOLE_SECONDARY_USB_SERIAL_JTAG` 包裹；非 S3 板型编译空实现（`start()` 返回 false、`reply()` no-op），开机不再打印 ERROR。CMakeLists 保持无条件加入，链接安全 |
+| F-4 | ✅ 已修 | 收包循环新增 `dropping` 标志；溢出后置位并丢弃整行，直到下一个 `\n` 才复位，半截命令不再进入 `handleLine()` |
+| F-5 | ⚠️ 判定修正后处理 | 核实 UI 的 `shutterLock()/shutterUnlock()` 本质就是发 `CMD_SHUTTER_PRESS/RELEASE`，原协议**可以**复现，并非硬缺口。为明确语义新增 `SHUTTER_LOCK/SHUTTER_UNLOCK` 别名，并更新 HELP、头注释与 README 协议表 |
+
+**对原 F-5 结论的修正**：原文"遥控脚本无法复现该行为"不准确——`SHUTTER_PRESS`（保持）+ `SHUTTER_RELEASE` 已等价。本次以补别名和文档的方式消除歧义，而非新增底层能力。
+
+### 7.1 验证结果
+
+- **编译（m5stick-s3）**：`pio run -e m5stick-s3` 完整构建 SUCCESS（EXIT=0），无 warning/error；Flash 1032308 B（较修复前 1030692 B +1616）。
+- **固件字符串**：`SHUTTER_LOCK / SHUTTER_UNLOCK / ERR not-connected / ERR busy / ERR unknown / /dev/secondary / AF-ON (hold) / CMDS PING` 全部命中 `firmware.bin`。
+- **非 S3 条件编译（F-3）**：`FurbleRemote.cpp` 在 `CONFIG_ESP_CONSOLE_SECONDARY_USB_SERIAL_JTAG=0` 下用 ESP-IDF 的 xtensa g++ 做 `-fsyntax-only` 检查通过，确认 `#else` 空实现分支可编译、链接符号齐全。未对 m5stick-c 做全量链接（PIO 增量清理触发本机安全 hook 的批量删除拦截，与代码无关；改用单文件编译检查等价验证条件编译正确性）。
+- **仍未做**：烧录与真机运行时验证（PING/SHUTTER/FOCUS 对 X100VI 的实际响应）——设备未连接，属第 4 节固有缺口，不受本次修复影响。
+
+### 7.2 待复核人确认
+
+- F-1 用持锁的 `submitIfActive()` 检查状态+入队，是否认可（非 ACTIVE 走无锁快速路径立即返回，避免连接阶段被 `connectAll()` 的长持锁阻塞；ACTIVE 才取锁，与 `Control::task()` 消费队列不冲突，无死锁风险）。
+- F-3 采用文件内 `#if` + 空实现而非改 CMakeLists，是否认可（好处是不破坏其他板型的符号链接）。
+- 是否接受对 F-5 的判定修正。

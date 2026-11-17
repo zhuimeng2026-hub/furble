@@ -207,6 +207,27 @@ refocus between shots.
 
 When in `Shutter` remote control, holding focus (button B) then release (button A) will engage shutter lock, holding the shutter open until a button is pressed.
 
+### USB Serial/JTAG remote (M5StickS3)
+
+On the M5StickS3 a line-based command channel is available on the USB
+Serial/JTAG secondary console (`/dev/secondary`, 115200 baud). Send an ASCII
+command terminated by `\n`; replies are prefixed with `>` to distinguish them
+from log output. `HELP` lists the full set. The camera commands are:
+
+| Command | Effect |
+| :--- | :--- |
+| `PING` | `PONG` |
+| `SHUTTER` / `SHUTTER_PRESS` / `SHUTTER_RELEASE` | shutter tap / hold / release |
+| `SHUTTER_LOCK` / `SHUTTER_UNLOCK` | hold shutter open / release (same as the UI's Shutter Lock) |
+| `FOCUS` / `FOCUS_PRESS` / `FOCUS_RELEASE` | AF-ON tap / hold / release |
+| `STATUS` | connection state and per-camera status |
+
+A camera command only returns `OK` when it was actually queued for dispatch.
+Without a live camera connection the reply is `ERR not-connected`; with a full
+control queue it is `ERR busy`. Scripts should treat anything other than `OK`
+as "the shot did not happen". The channel is only present on builds that
+enable `CONFIG_ESP_CONSOLE_SECONDARY_USB_SERIAL_JTAG` (M5StickS3).
+
 ### Themes
 
 A few basic themes are included, to change:

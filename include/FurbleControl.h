@@ -3,6 +3,8 @@
 
 #include <memory>
 #include <mutex>
+#include <string>
+#include <vector>
 
 #include <Camera.h>
 
@@ -93,8 +95,38 @@ class Control {
    */
   bool allConnected(void);
 
+  /** Target status for a lock-safe snapshot. */
+  struct TargetInfo {
+    std::string name;
+    bool connected;
+  };
+
+  /** Lock-safe snapshot of control state and target list (F-2). */
+  struct Snapshot {
+    state_t state;
+    std::vector<TargetInfo> targets;
+  };
+
+  /** Result of submitIfActive(), so callers can report an accurate error. */
+  typedef enum {
+    SUBMIT_OK,             /**< Queued for dispatch. */
+    SUBMIT_NOT_CONNECTED,  /**< No active camera connection. */
+    SUBMIT_BUSY            /**< Camera connected but control queue is full. */
+  } submit_result_t;
+
+  /**
+   * Enqueue a command only if a camera connection is active, and report
+   * whether the command was actually accepted (F-1).
+   */
+  submit_result_t submitIfActive(cmd_t cmd);
+
+  /** Lock-safe copy of state and targets, safe to iterate without the mutex. */
+  Snapshot snapshot(void);
+
   /**
    * Get list of connected targets.
+   *
+   * @note Prefer snapshot() from tasks that cannot hold m_Mutex.
    */
   const std::vector<std::unique_ptr<Control::Target>> &getTargets(void);
 

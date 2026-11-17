@@ -1,3 +1,10 @@
+#include "sdkconfig.h"
+
+#include "FurbleControl.h"
+#include "FurbleRemote.h"
+
+#if CONFIG_ESP_CONSOLE_SECONDARY_USB_SERIAL_JTAG
+
 #include <fcntl.h>
 #include <unistd.h>
 
@@ -7,9 +14,6 @@
 #include <esp_log.h>
 #include <freertos/FreeRTOS.h>
 #include <freertos/task.h>
-
-#include "FurbleControl.h"
-#include "FurbleRemote.h"
 
 namespace Furble {
 
@@ -30,6 +34,9 @@ static constexpr TickType_t REMOTE_POLL_MS = 10;
  * simply ignored by the camera. */
 static constexpr uint32_t REMOTE_FOCUS_HOLD_MS = 400;
 
+/* How long a SHUTTER tap holds the shutter press before releasing. */
+static constexpr TickType_t REMOTE_SHUTTER_HOLD_MS = pdMS_TO_TICKS(100);
+
 static int s_RemoteFd = -1;
 
 void Remote::reply(const char *line) {
@@ -44,6 +51,35 @@ void Remote::reply(const char *line) {
 }
 
 void Remote::handleLine(char *line) {
+  /* Translate a submit result into an honest response. A command is only
+   * acknowledged when it was actually queued for dispatch (F-1). */
+  auto replySubmit = [](Control::submit_result_t result) {
+    switch (result) {
+      case Control::SUBMIT_OK:
+        reply("OK");
+        break;
+      case Control::SUBMIT_NOT_CONNECTED:
+        reply("ERR not-connected");
+        break;
+      case Control::SUBMIT_BUSY:
+        reply("ERR busy");
+        break;
+    }
+  };
+
+  /* Press-then-release with a hold between. Both halves must be accepted
+   * before an OK is sent, otherwise the script is told a lie (F-1). */
+  auto tap = [&replySubmit](Control &control, Control::cmd_t press,
+                            Control::cmd_t release, TickType_t hold) {
+    Control::submit_result_t result = control.submitIfActive(press);
+    if (result != Control::SUBMIT_OK) {
+      replySubmit(result);
+      return;
+    }
+    vTaskDelay(hold);
+    replySubmit(control.submitIfActive(release));
+  };
+
   /* Trim CR/LF and leading spaces. */
   while (*line == ' ' || *line == '\r' || *line == '\n') {
     line++;
@@ -61,45 +97,44 @@ void Remote::handleLine(char *line) {
   if (strcmp(line, "PING") == 0) {
     reply("PONG");
   } else if (strcmp(line, "SHUTTER") == 0) {
-    control.sendCommand(Control::CMD_SHUTTER_PRESS);
-    vTaskDelay(pdMS_TO_TICKS(100));
-    control.sendCommand(Control::CMD_SHUTTER_RELEASE);
-    reply("OK");
+    tap(control, Control::CMD_SHUTTER_PRESS, Control::CMD_SHUTTER_RELEASE,
+        REMOTE_SHUTTER_HOLD_MS);
   } else if (strcmp(line, "SHUTTER_PRESS") == 0) {
-    control.sendCommand(Control::CMD_SHUTTER_PRESS);
-    reply("OK");
+    replySubmit(control.submitIfActive(Control::CMD_SHUTTER_PRESS));
   } else if (strcmp(line, "SHUTTER_RELEASE") == 0) {
-    control.sendCommand(Control::CMD_SHUTTER_RELEASE);
-    reply("OK");
+    replySubmit(control.submitIfActive(Control::CMD_SHUTTER_RELEASE));
+  } else if (strcmp(line, "SHUTTER_LOCK") == 0) {
+    /* Same as the UI's shutterLock(): hold the shutter open. */
+    replySubmit(control.submitIfActive(Control::CMD_SHUTTER_PRESS));
+  } else if (strcmp(line, "SHUTTER_UNLOCK") == 0) {
+    /* Same as the UI's shutterUnlock(): release the held shutter. */
+    replySubmit(control.submitIfActive(Control::CMD_SHUTTER_RELEASE));
   } else if (strcmp(line, "FOCUS") == 0) {
-    control.sendCommand(Control::CMD_FOCUS_PRESS);
-    vTaskDelay(pdMS_TO_TICKS(REMOTE_FOCUS_HOLD_MS));
-    control.sendCommand(Control::CMD_FOCUS_RELEASE);
-    reply("OK");
+    tap(control, Control::CMD_FOCUS_PRESS, Control::CMD_FOCUS_RELEASE,
+        pdMS_TO_TICKS(REMOTE_FOCUS_HOLD_MS));
   } else if (strcmp(line, "FOCUS_PRESS") == 0) {
-    control.sendCommand(Control::CMD_FOCUS_PRESS);
-    reply("OK");
+    replySubmit(control.submitIfActive(Control::CMD_FOCUS_PRESS));
   } else if (strcmp(line, "FOCUS_RELEASE") == 0) {
-    control.sendCommand(Control::CMD_FOCUS_RELEASE);
-    reply("OK");
+    replySubmit(control.submitIfActive(Control::CMD_FOCUS_RELEASE));
   } else if (strcmp(line, "STATUS") == 0) {
+    /* Iterate a lock-safe copy: disconnect() clears m_Targets under m_Mutex,
+     * so touching the live vector here used to risk iterator invalidation /
+     * use-after-free (F-2). */
+    Control::Snapshot snap = control.snapshot();
     char buf[REMOTE_LINE_MAX];
     snprintf(buf, sizeof(buf), "STATE %d TARGETS %u",
-             static_cast<int>(control.getState()),
-             static_cast<unsigned int>(control.getTargets().size()));
+             static_cast<int>(snap.state),
+             static_cast<unsigned int>(snap.targets.size()));
     reply(buf);
-    for (const auto &target : control.getTargets()) {
-      auto *camera = target->getCamera();
-      if (camera == nullptr) {
-        continue;
-      }
+    for (const auto &target : snap.targets) {
       char cbuf[REMOTE_LINE_MAX];
-      snprintf(cbuf, sizeof(cbuf), "CAM %s %s", camera->getName().c_str(),
-               camera->isConnected() ? "connected" : "disconnected");
+      snprintf(cbuf, sizeof(cbuf), "CAM %s %s", target.name.c_str(),
+               target.connected ? "connected" : "disconnected");
       reply(cbuf);
     }
   } else if (strcmp(line, "HELP") == 0) {
-    reply("CMDS PING SHUTTER SHUTTER_PRESS SHUTTER_RELEASE FOCUS FOCUS_PRESS FOCUS_RELEASE STATUS HELP");
+    reply("CMDS PING SHUTTER SHUTTER_PRESS SHUTTER_RELEASE SHUTTER_LOCK SHUTTER_UNLOCK "
+          "FOCUS FOCUS_PRESS FOCUS_RELEASE STATUS HELP");
   } else {
     reply("ERR unknown");
   }
@@ -119,6 +154,7 @@ void Remote::task(void *param) {
 
   char line[REMOTE_LINE_MAX];
   size_t used = 0;
+  bool dropping = false;
   char chunk[REMOTE_LINE_MAX];
 
   while (true) {
@@ -127,14 +163,22 @@ void Remote::task(void *param) {
       for (int i = 0; i < rx; i++) {
         char c = chunk[i];
         if (c == '\n') {
-          line[used] = '\0';
-          handleLine(line);
+          /* An overflowed line is discarded in full; only a clean, complete
+           * line may ever reach the parser (F-4). */
+          if (!dropping) {
+            line[used] = '\0';
+            handleLine(line);
+          }
           used = 0;
+          dropping = false;
         } else if (c != '\r') {
+          if (dropping) {
+            continue;
+          }
           if (used < sizeof(line) - 1) {
             line[used++] = c;
           } else {
-            /* Overflow: drop the partial line. */
+            dropping = true;
             used = 0;
           }
         }
@@ -156,3 +200,22 @@ bool Remote::start(void) {
 }
 
 }  // namespace Furble
+
+#else  // !CONFIG_ESP_CONSOLE_SECONDARY_USB_SERIAL_JTAG
+
+/* On boards without the USB Serial/JTAG secondary console there is no
+ * /dev/secondary to open. Keep the public API linkable but inert, so those
+ * builds do not emit a spurious ERROR at every boot (F-3). */
+namespace Furble {
+
+bool Remote::start(void) {
+  return false;
+}
+
+void Remote::reply(const char *line) {
+  (void)line;
+}
+
+}  // namespace Furble
+
+#endif  // CONFIG_ESP_CONSOLE_SECONDARY_USB_SERIAL_JTAG

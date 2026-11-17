@@ -19,12 +19,18 @@ namespace Furble {
  *   SHUTTER           -> ">OK"          (press + release)
  *   SHUTTER_PRESS     -> ">OK"
  *   SHUTTER_RELEASE   -> ">OK"
+ *   SHUTTER_LOCK      -> ">OK"          (hold shutter open, like the UI)
+ *   SHUTTER_UNLOCK    -> ">OK"          (release the held shutter)
  *   FOCUS             -> ">OK"          (press + hold + release)
  *   FOCUS_PRESS       -> ">OK"
  *   FOCUS_RELEASE     -> ">OK"
- *   STATUS            -> ">STATE <n> <camera-name>"
+ *   STATUS            -> ">STATE <n> TARGETS <m>" then ">CAM <name> <state>"
  *   HELP              -> ">CMDS <space separated list>"
  *   anything else     -> ">ERR unknown"
+ *
+ * Camera commands are only acknowledged when they were actually queued for
+ * dispatch. With no active camera connection the reply is
+ * ">ERR not-connected"; with a full control queue it is ">ERR busy".
  *
  * 'FOCUS' holds the AF-ON button down long enough for the camera to acquire
  * focus. With the camera set to AF-S this locks the focus point, so a

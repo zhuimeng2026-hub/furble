@@ -190,6 +190,39 @@ BaseType_t Control::sendCommand(cmd_t cmd) {
   return xQueueSend(m_Queue, &cmd, 0);
 }
 
+Control::submit_result_t Control::submitIfActive(cmd_t cmd) {
+  /* Fast path: an enum read on 32-bit is atomic (same as getState()). Reject
+   * non-active states without taking m_Mutex -- connectAll() can hold that
+   * mutex for the whole camera connect timeout (up to 30s), and a remote
+   * command during that phase must fail fast, not block the remote task. */
+  if (m_State != STATE_ACTIVE) {
+    return SUBMIT_NOT_CONNECTED;
+  }
+
+  /* Active path: check targets and enqueue under the same lock so disconnect()
+   * cannot tear down the targets between the check and the enqueue. */
+  const std::lock_guard<std::mutex> lock(m_Mutex);
+  if (m_State != STATE_ACTIVE || m_Targets.empty() || !allConnected()) {
+    return SUBMIT_NOT_CONNECTED;
+  }
+  return (xQueueSend(m_Queue, &cmd, 0) == pdTRUE) ? SUBMIT_OK : SUBMIT_BUSY;
+}
+
+Control::Snapshot Control::snapshot(void) {
+  const std::lock_guard<std::mutex> lock(m_Mutex);
+  Snapshot result;
+  result.state = m_State;
+  result.targets.reserve(m_Targets.size());
+  for (const auto &target : m_Targets) {
+    auto *camera = target->getCamera();
+    if (camera == nullptr) {
+      continue;
+    }
+    result.targets.push_back({camera->getName(), camera->isConnected()});
+  }
+  return result;
+}
+
 BaseType_t Control::updateGPS(const Camera::gps_t &gps, const Camera::timesync_t &timesync) {
   for (const auto &target : m_Targets) {
     target->updateGPS(gps, timesync);
