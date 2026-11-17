@@ -3,6 +3,7 @@ set(furble_sources
     FurbleControl.cpp
     FurbleGPS.cpp
     FurblePlatform.cpp
+    FurbleRemote.cpp
     FurbleSettings.cpp
     FurbleSpinValue.cpp
     FurbleUI.cpp

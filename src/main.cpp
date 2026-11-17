@@ -5,6 +5,7 @@
 
 #include "FurbleControl.h"
 #include "FurblePlatform.h"
+#include "FurbleRemote.h"
 #include "FurbleSettings.h"
 #include "FurbleUI.h"
 
@@ -34,6 +35,8 @@ void app_main() {
     ESP_LOGE(LOG_TAG, "Failed to create control task.");
     abort();
   }
+
+  Furble::Remote::start();
 
   // Run UI in host task (here)
   vUITask(NULL);
